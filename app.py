@@ -1,3 +1,5 @@
+import asyncio
+import sys
 import os
 import streamlit as st
 from PyPDF2 import PdfReader
@@ -7,6 +9,9 @@ import faiss
 import requests
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
+
+if sys.platform.startswith("win"):
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 load_dotenv()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
