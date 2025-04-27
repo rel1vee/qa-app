@@ -6,7 +6,7 @@ from sentence_transformers import SentenceTransformer
 import faiss
 import requests
 from dotenv import load_dotenv
-from datetime import datetime
+from datetime import datetime, timedelta
 
 load_dotenv()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
@@ -70,7 +70,13 @@ def query_model(prompt, context, model):
         if 'choices' in response_json and len(response_json['choices']) > 0:
             return response_json['choices'][0]['message']['content']
         else:
-            return f"Unexpected response format from API: {response_json}"
+            reset_time = response_json.get('error', {}).get('metadata', {}).get('headers', {}).get('X-RateLimit-Reset')
+            if reset_time:
+                wib_time = datetime.fromtimestamp(int(reset_time) / 1000) + timedelta(hours=7)
+                formatted_time = wib_time.strftime('%Y-%m-%d %H:%M:%S WIB')
+                return f"Rate limit exceeded. Please wait until {formatted_time} to try again."
+            else:
+                return "No reset time available."
             
     except requests.RequestException as e:
         return f"Error fetching answer: {e}"
@@ -212,7 +218,7 @@ def main():
             st.warning("Please enter a question.")
         elif 'chunks' not in st.session_state:
             st.warning("Please upload a PDF first.")
-        elif "No free models" in [model1, model2]:
+        elif "No free models available." in [model1, model2]:
             st.warning("No free models available. Please try again later.")
         else:
             with st.spinner('Fetching answers...'):
