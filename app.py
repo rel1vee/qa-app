@@ -6,9 +6,7 @@ from sentence_transformers import SentenceTransformer
 import faiss
 import requests
 from dotenv import load_dotenv
-import streamlit.components.v1 as components
-import torch
-import json
+from datetime import datetime
 
 load_dotenv()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
@@ -67,9 +65,19 @@ def query_model(prompt, context, model):
         }
         response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data)
         response.raise_for_status()
-        return response.json()['choices'][0]['message']['content']
+        
+        response_json = response.json()
+        if 'choices' in response_json and len(response_json['choices']) > 0:
+            return response_json['choices'][0]['message']['content']
+        else:
+            return f"Unexpected response format from API: {response_json}"
+            
     except requests.RequestException as e:
         return f"Error fetching answer: {e}"
+    except KeyError as e:
+        return f"Missing key in API response: {e}"
+    except Exception as e:
+        return f"Unexpected error: {e}"
 
 # Apply custom CSS for elegant UI with readable font
 def set_custom_style():
@@ -165,24 +173,6 @@ def set_custom_style():
             font-family: 'Inter', sans-serif;
             font-size: 14px;
         }
-        .copy-button {
-            background: #334155;
-            color: #E6E6FA;
-            border: none;
-            border-radius: 6px;
-            padding: 8px 16px;
-            font-family: 'Inter', sans-serif;
-            font-size: 14px;
-            cursor: pointer;
-            transition: all 0.3s ease;
-        }
-        .copy-button:hover {
-            background: #475569;
-            box-shadow: 0 4px 8px rgba(0, 0, 0,  Uy0.2);
-        }
-        .copy-button.copied {
-            background: #14B8A6;
-        }
     </style>
     """, unsafe_allow_html=True)
 
@@ -201,27 +191,27 @@ def main():
     with st.sidebar:
         uploaded_file = st.file_uploader("Upload PDF:", type="pdf")
         if uploaded_file and 'chunks' not in st.session_state:
-            with st.spinner('Processing document...'):
+            with st.spinner('Processing PDF...'):
                 chunks = process_pdf(uploaded_file)
                 if chunks:
                     st.session_state['chunks'] = chunks
                     st.session_state['index'] = create_embeddings(chunks)
-                    st.markdown('<div class="info-box">✓ Document processed successfully.</div>', unsafe_allow_html=True)
+                    st.markdown('<div class="info-box">✓ PDF processed successfully.</div>', unsafe_allow_html=True)
                 else:
-                    st.error("Failed to process document.")
+                    st.error("Failed to process PDF.")
         
         models = get_free_openrouter_models()
         st.subheader("Select Models")
         model1 = st.selectbox("⚙️ Model 1:", models, key="model1")
         model2 = st.selectbox("⚙️ Model 2:", models, key="model2")
 
-    user_question = st.text_input("Ask a question:", placeholder="Type your question about the document...")
+    user_question = st.text_input("Ask a question:", placeholder="Type your question about the PDF...")
         
     if user_question:
         if not user_question.strip():
             st.warning("Please enter a question.")
         elif 'chunks' not in st.session_state:
-            st.warning("Please upload a PDF document first.")
+            st.warning("Please upload a PDF first.")
         elif "No free models" in [model1, model2]:
             st.warning("No free models available. Please try again later.")
         else:
@@ -233,80 +223,18 @@ def main():
                 answer1 = query_model(user_question, context, model1)
                 answer2 = query_model(user_question, context, model2)
                 
-                # Escape answers for JavaScript by encoding to JSON
-                answer1_escaped = json.dumps(answer1)
-                answer2_escaped = json.dumps(answer2)
-                
-                # Generate unique IDs for copy buttons
-                answer1_id = "answer1_copy"
-                answer2_id = "answer2_copy"
-                
-                # Display answers with badges and copy buttons
                 st.markdown(f"""
                 <div class="comparison-container">
                     <div class="comparison-column">
                         <p class="model-badge">⚙️ {model1}</p>
                         <p>{answer1}</p>
-                        <button class="copy-button" id="{answer1_id}_btn" onclick="copyToClipboard('{answer1_id}')">Copy Answer</button>
                     </div>
                     <div class="comparison-column">
                         <p class="model-badge">⚙️ {model2}</p>
                         <p>{answer2}</p>
-                        <button class="copy-button" id="{answer2_id}_btn" onclick="copyToClipboard('{answer2_id}')">Copy Answer</button>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
-                
-                # Inject JavaScript for copying text with textarea fallback
-                components.html("""
-                <script>
-                    function copyToClipboard(id) {
-                        var text;
-                        if (id === '%s') {
-                            text = %s;
-                        } else if (id === '%s') {
-                            text = %s;
-                        }
-                        
-                        // Try modern Clipboard API
-                        if (navigator.clipboard) {
-                            navigator.clipboard.writeText(text).then(() => {
-                                var button = document.getElementById(id + '_btn');
-                                button.textContent = 'Copied!';
-                                button.classList.add('copied');
-                                setTimeout(() => {
-                                    button.textContent = 'Copy Answer';
-                                    button.classList.remove('copied');
-                                }, 2000);
-                            }).catch(err => {
-                                fallbackCopy(text, id);
-                            });
-                        } else {
-                            fallbackCopy(text, id);
-                        }
-                    }
-                    function fallbackCopy(text, id) {
-                        var textarea = document.createElement('textarea');
-                        textarea.value = text;
-                        document.body.appendChild(textarea);
-                        textarea.select();
-                        try {
-                            document.execCommand('copy');
-                            var button = document.getElementById(id + '_btn');
-                            button.textContent = 'Copied!';
-                            button.classList.add('copied');
-                            setTimeout(() => {
-                                button.textContent = 'Copy Answer';
-                                button.classList.remove('copied');
-                            }, 2000);
-                        } catch (err) {
-                            console.error('Fallback copy failed: ', err);
-                            alert('Failed to copy text. Please select and copy manually.');
-                        }
-                        document.body.removeChild(textarea);
-                    }
-                </script>
-                """ % (answer1_id, answer1_escaped, answer2_id, answer2_escaped), height=0)
 
 if __name__ == "__main__":
     main()
