@@ -7,11 +7,12 @@ import faiss
 import requests
 from dotenv import load_dotenv
 import streamlit.components.v1 as components
+import torch
 import json
 
 load_dotenv()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-EMBEDDING_MODEL = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+EMBEDDING_MODEL = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2', device='cpu')
 
 # Fetch free models from OpenRouter
 def get_free_openrouter_models():
