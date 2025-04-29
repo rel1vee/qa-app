@@ -1,246 +1,144 @@
 import os
 import streamlit as st
-from PyPDF2 import PdfReader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from sentence_transformers import SentenceTransformer
-import faiss
-import requests
 from dotenv import load_dotenv
+import requests
+import base64
+from PyPDF2 import PdfReader
 from datetime import datetime, timedelta
 
+# Load environment
 load_dotenv()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-EMBEDDING_MODEL = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2', device='cpu')
+if not OPENROUTER_API_KEY:
+    st.error("OPENROUTER_API_KEY not found in .env file.")
+    st.stop()
 
-# Fetch free models from OpenRouter
-def get_free_openrouter_models():
+# Utilities
+def get_free_openrouter_models(required_modality="text"):
     try:
         headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}"}
-        response = requests.get("https://openrouter.ai/api/v1/models", headers=headers)
-        response.raise_for_status()
-        models = [
-            model['id'] for model in response.json()['data']
-            if model.get('pricing', {}).get('completion', '0') == '0' and
-            model.get('pricing', {}).get('prompt', '0') == '0'
-        ]
-        return models or ["No free models available."]
-    except requests.RequestException as e:
-        st.error(f"Failed to fetch models: {e}")
+        res = requests.get("https://openrouter.ai/api/v1/models", headers=headers)
+        res.raise_for_status()
+        data = res.json().get('data', [])
+        free = []
+        for m in data:
+            pr = m.get('pricing', {})
+            if all(pr.get(key, '0') == '0' for key in ['prompt', 'completion', 'request', 'image', 'web_search', 'internal_reasoning']):
+                arch = m.get('architecture', {})
+                input_modalities = arch.get('input_modalities', ['text'])
+                if required_modality in input_modalities:
+                    free.append({
+                        'id': m['id'],
+                        'name': m['name'],
+                        'input_modalities': input_modalities
+                    })
+        return free
+    except Exception as e:
+        st.error(f"Error fetching models: {e}")
         return []
 
-# Process PDF into text chunks
-def process_pdf(pdf_file):
+def encode_image(file):
     try:
-        pdf_reader = PdfReader(pdf_file)
-        text = "".join(page.extract_text() or "" for page in pdf_reader.pages)
-        if not text.strip():
-            raise ValueError("No text extracted from PDF.")
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=200)
-        return text_splitter.split_text(text)
+        return base64.b64encode(file.read()).decode('utf-8')
     except Exception as e:
-        st.error(f"Error processing PDF: {e}")
-        return []
-
-# Create FAISS index from text chunks
-def create_embeddings(chunks):
-    try:
-        embeddings = EMBEDDING_MODEL.encode(chunks, show_progress_bar=False)
-        index = faiss.IndexFlatL2(embeddings.shape[1])
-        index.add(embeddings.astype('float32'))
-        return index
-    except Exception as e:
-        st.error(f"Error creating embeddings: {e}")
+        st.error(f"Image encoding error: {e}")
         return None
 
-# Query a specific model with context
-def query_model(prompt, context, model):
+def process_pdf(file):
+    try:
+        reader = PdfReader(file)
+        text = ''.join(p.extract_text() or '' for p in reader.pages)
+        if not text.strip():
+            raise ValueError("No text extracted from PDF.")
+        return text
+    except Exception as e:
+        st.error(f"PDF processing error: {e}")
+        return None
+
+def query_model(prompt, model_id, image_data=None):
     try:
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {OPENROUTER_API_KEY}"}
-        data = {
-            "messages": [
-                {"role": "system", "content": f"Answer based on this context:\n{context}"},
-                {"role": "user", "content": prompt}
-            ],
-            "model": model
-        }
-        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data)
-        response.raise_for_status()
+        messages = []
         
-        response_json = response.json()
-        if 'choices' in response_json and len(response_json['choices']) > 0:
-            return response_json['choices'][0]['message']['content']
+        if image_data:
+            messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}
+                ]
+            })
         else:
-            reset_time = response_json.get('error', {}).get('metadata', {}).get('headers', {}).get('X-RateLimit-Reset')
-            if reset_time:
-                wib_time = datetime.fromtimestamp(int(reset_time) / 1000) + timedelta(hours=7)
-                formatted_time = wib_time.strftime('%Y-%m-%d %H:%M:%S WIB')
-                return f"Rate limit exceeded. Please wait until {formatted_time} to try again."
-            else:
-                return "No reset time available."
-            
-    except requests.RequestException as e:
-        return f"Error fetching answer: {e}"
-    except KeyError as e:
-        return f"Missing key in API response: {e}"
+            messages.append({"role": "user", "content": prompt})
+
+        payload = {
+            "model": model_id,
+            "messages": messages
+        }
+        resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+        return data['choices'][0]['message']['content']
+    except requests.HTTPError as he:
+        err = he.response.json().get('error', {})
+        reset = err.get('metadata', {}).get('headers', {}).get('X-RateLimit-Reset')
+        if reset:
+            t = datetime.fromtimestamp(int(reset) / 1000) + timedelta(hours=7)
+            return f"Rate limit exceeded. Try after {t.strftime('%Y-%m-%d %H:%M:%S WIB')}"
+        return f"Model API error: {err.get('message', str(he))}"
     except Exception as e:
         return f"Unexpected error: {e}"
 
-# Apply custom CSS for elegant UI with readable font
-def set_custom_style():
-    st.markdown("""
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-        body {
-            background: #0F172A;
-            color: #E6E6FA;
-            font-family: 'Inter', sans-serif;
-            font-size: 16px;
-            line-height: 1.5;
-        }
-        h1, h2, h3, h4 {
-            color: #FFFFFF;
-            font-family: 'Inter', sans-serif;
-            font-weight: 700;
-        }
-        h1 { font-size: 28px; }
-        h4 { font-size: 18px; }
-        .stTextInput > div > div > input {
-            background: #1E293B;
-            color: #E6E6FA;
-            border: 1px solid #334155;
-            border-radius: 8px;
-            font-family: 'Inter', sans-serif;
-            font-size: 16px;
-        }
-        .stTextInput > label {
-            color: #CBD5E1;
-            font-family: 'Inter', sans-serif;
-            font-size: 14px;
-        }
-        .stSelectbox > label {
-            color: #CBD5E1;
-            font-family: 'Inter', sans-serif;
-            font-size: 14px;
-        }
-        .stFileUploader > div > div {
-            background: #1E293B;
-            border: 2px dashed #334155;
-            border-radius: 8px;
-            padding: 20px;
-        }
-        .stFileUploader > div > div > div > button {
-            background: #0EA5E9;
-            color: white;
-            border-radius: 6px;
-            padding: 6px 15px;
-            font-family: 'Inter', sans-serif;
-            transition: all 0.3s ease;
-        }
-        .stFileUploader > div > div > div > button:hover {
-            background: #0284C7;
-            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
-        }
-        .comparison-container {
-            display: flex;
-            gap: 20px;
-            margin-top: 20px;
-            flex-wrap: wrap;
-        }
-        .comparison-column {
-            flex: 1;
-            background: linear-gradient(145deg, #1E293B, #283447);
-            border-radius: 12px;
-            padding: 24px;
-            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
-            border-left: 4px solid #0EA5E9;
-            min-width: 300px;
-        }
-        .comparison-column p {
-            font-family: 'Inter', sans-serif;
-            font-size: 16px;
-            color: #E6E6FA;
-        }
-        .model-badge {
-            display: inline-block;
-            background: linear-gradient(90deg, #0284C7, #0EA5E9);
-            color: #FFFFFF;
-            font-family: 'Inter', sans-serif;
-            font-size: 12px;
-            font-weight: 600;
-            padding: 3px 12px;
-            border-radius: 16px;
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
-        }
-        .info-box {
-            background: rgba(14, 165, 233, 0.1);
-            border-radius: 8px;
-            padding: 16px;
-            border-left: 4px solid #0EA5E9;
-            font-family: 'Inter', sans-serif;
-            font-size: 14px;
-        }
-    </style>
-    """, unsafe_allow_html=True)
-
 def main():
-    st.set_page_config(page_title="ChatPDF Assistant", layout="wide", page_icon="🔥")
-    set_custom_style()
+    st.set_page_config(page_title="Zoro.ai", layout="wide", page_icon="🔥")
+    st.sidebar.title("⚙️ Zoro's Settings")
+
+    # File upload
+    uploaded_file = st.sidebar.file_uploader("📂 Upload:", type=['pdf', 'png', 'jpg', 'jpeg'])
+
+    # Determine input type and modality
+    input_type = "text"
+    file_data = None
+    pdf_text = None
+    if uploaded_file:
+        file_extension = uploaded_file.name.lower().split('.')[-1]
+        if file_extension in ['png', 'jpg', 'jpeg']:
+            input_type = "image"
+            file_data = encode_image(uploaded_file)
+            if not file_data:
+                st.error("Failed to encode image. Please try another file.")
+                return
+        elif file_extension == 'pdf':
+            input_type = "text"
+            pdf_text = process_pdf(uploaded_file)
+            if not pdf_text:
+                st.error("Failed to extract text from PDF. Please try another file.")
+                return
+
+    # Display extracted PDF text
+    if pdf_text:
+        st.sidebar.success("PDF extracted successfully.")
+
+    # Model selection
+    models = get_free_openrouter_models(required_modality=input_type)
+    model_id = st.sidebar.selectbox("🤖 Model:", options=[m['id'] for m in models], format_func=lambda x: next(m['name'] for m in models if m['id'] == x))
+
+    # Main interface
+    st.header("🔥 Zoro.ai")
     
-    # Header
-    st.markdown("""
-    <div style="display: flex; align-items: center; margin-bottom: 20px;">
-        <h1>🔥 ChatPDF Assistant</h1>
-    </div>
-    """, unsafe_allow_html=True)
+    # Use a form to enable Enter key submission
+    with st.form(key="query_form"):
+        prompt = st.text_area("Prompt:", placeholder="What do you want to know...")
+        submit_button = st.form_submit_button("Get Answers", type="secondary")
 
-    # Sidebar
-    with st.sidebar:
-        uploaded_file = st.file_uploader("Upload PDF:", type="pdf")
-        if uploaded_file and 'chunks' not in st.session_state:
-            with st.spinner('Processing PDF...'):
-                chunks = process_pdf(uploaded_file)
-                if chunks:
-                    st.session_state['chunks'] = chunks
-                    st.session_state['index'] = create_embeddings(chunks)
-                    st.markdown('<div class="info-box">✓ PDF processed successfully.</div>', unsafe_allow_html=True)
-                else:
-                    st.error("Failed to process PDF.")
-        
-        models = get_free_openrouter_models()
-        st.subheader("Select Models")
-        model1 = st.selectbox("⚙️ Model 1:", models, key="model1")
-        model2 = st.selectbox("⚙️ Model 2:", models, key="model2")
+        if submit_button:
+            if not prompt:
+                st.error("Please enter a prompt before submitting.")
+            else:
+                final_prompt = f"{pdf_text}\n\n{prompt}" if pdf_text else prompt
+                with st.spinner("Wait a second..."):
+                    ans = query_model(final_prompt, model_id, file_data if input_type == "image" else None)
+                st.markdown(f'{ans}')
 
-    user_question = st.text_input("Ask a question:", placeholder="Type your question about the PDF...")
-        
-    if user_question:
-        if not user_question.strip():
-            st.warning("Please enter a question.")
-        elif 'chunks' not in st.session_state:
-            st.warning("Please upload a PDF first.")
-        elif "No free models available." in [model1, model2]:
-            st.warning("No free models available. Please try again later.")
-        else:
-            with st.spinner('Fetching answers...'):
-                question_embedding = EMBEDDING_MODEL.encode([user_question])
-                _, indices = st.session_state['index'].search(question_embedding.astype('float32'), 3)
-                context = "\n".join(st.session_state['chunks'][i] for i in indices[0])
-                
-                answer1 = query_model(user_question, context, model1)
-                answer2 = query_model(user_question, context, model2)
-                
-                st.markdown(f"""
-                <div class="comparison-container">
-                    <div class="comparison-column">
-                        <p class="model-badge">⚙️ {model1}</p>
-                        <p>{answer1}</p>
-                    </div>
-                    <div class="comparison-column">
-                        <p class="model-badge">⚙️ {model2}</p>
-                        <p>{answer2}</p>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

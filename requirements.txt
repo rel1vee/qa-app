@@ -1,8 +1,4 @@
-streamlit 
-PyPDF2 
-langchain 
-sentence-transformers 
-faiss-cpu 
-requests 
+streamlit
 python-dotenv
-torch
+requests
+PyPDF2
