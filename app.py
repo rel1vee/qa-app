@@ -115,10 +115,6 @@ def main():
                 st.error("Failed to extract text from PDF. Please try another file.")
                 return
 
-    # Display extracted PDF text
-    if pdf_text:
-        st.sidebar.success("PDF extracted successfully.")
-
     # Model selection
     models = get_free_openrouter_models(required_modality=input_type)
     model_id = st.sidebar.selectbox("🤖 Model:", options=[m['id'] for m in models], format_func=lambda x: next(m['name'] for m in models if m['id'] == x))
